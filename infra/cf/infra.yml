@@ -1,0 +1,242 @@
+Description: >
+    Example infrastructure for static projects.
+
+Parameters:
+
+    ProjectSlug:
+        Type: String
+        Description: The slugified name of the project, e.g. dex.
+    
+    TLD:
+        Type: String
+        Default: 0xcert.org
+        Description: The top-level domain of the app.
+
+    GitHubOAuthToken: 
+        Description: Create a token with 'repo' and 'admin:repo_hook' permissions here https://github.com/settings/tokens
+        Type: String
+
+    GitHubUser:
+        Description: GitHub username of the repository owner
+        Type: String
+
+    GitHubRepository:
+        Description: Repository name that should be monitored for changes
+        Type: String
+
+    GitHubBranch:
+        Description: GitHub branch to monitored
+        Type: String
+        Default: master
+
+Resources:
+    S3Bucket:
+        Type: AWS::S3::Bucket
+        Properties: 
+            AccessControl: PublicRead
+            BucketName: !Sub ${ProjectSlug}.${TLD}
+            Tags: 
+            - 
+                Key: "project"
+                Value: !Sub ${ProjectSlug}
+            WebsiteConfiguration:
+                IndexDocument: index.html
+    BuildsStoreBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            VersioningConfiguration:
+                Status: Enabled
+            AccessControl: BucketOwnerFullControl
+            BucketName: !Sub ${TLD}-builds
+
+    CodeBuild:
+        Type: AWS::CodeBuild::Project
+        Properties:
+            Name: !Ref ProjectSlug
+            Description: !Sub Build project for ${ProjectSlug}
+            ServiceRole: !Ref CodeBuildRole
+            Source:
+                Type: CODEPIPELINE
+                BuildSpec: infra/build/buildspec.yml
+            Environment:
+                ComputeType: BUILD_GENERAL1_SMALL
+                Image: aws/codebuild/nodejs:10.1.0
+                Type: LINUX_CONTAINER
+                EnvironmentVariables:
+                    - 
+                        Name: ARTIFACT_S3_BUCKET
+                        Value: !Sub ${BuildsStoreBucket}
+            Artifacts:
+                Name: !Ref ProjectSlug
+                Type: CODEPIPELINE
+
+    CodePipeline:
+        Type: AWS::CodePipeline::Pipeline
+        Properties:
+            Name: !Ref ProjectSlug
+            RoleArn: !Sub ${CodePipelineRole.Arn}
+            ArtifactStore: 
+                Type: S3
+                Location: !Ref BuildsStoreBucket
+            Stages:
+                - 
+                    Name: Source
+                    Actions:
+                        -
+                            Name: GitHub
+                            ActionTypeId:
+                                Category: Source
+                                Owner: ThirdParty
+                                Version: 1
+                                Provider: GitHub
+                            OutputArtifacts:
+                                -  Name: Source
+                            Configuration:
+                                Owner: !Ref GitHubUser
+                                Repo: !Ref GitHubRepository
+                                Branch: !Ref GitHubBranch
+                                OAuthToken: !Ref GitHubOAuthToken
+                -
+                    Name: Build
+                    Actions:
+                        -
+                            Name: CodeBuild
+                            InputArtifacts:
+                                - Name: Source
+                            ActionTypeId: 
+                                Category: Build
+                                Owner: AWS
+                                Version: 1
+                                Provider: CodeBuild
+                            OutputArtifacts:
+                                - Name: Built
+                            Configuration: 
+                                ProjectName: !Ref CodeBuild
+
+
+    #############
+    ### ROLES ###
+    #############
+    CodeBuildRole:
+        Type: AWS::IAM::Role
+        Properties: 
+            Path: /
+            RoleName: !Sub ${ProjectSlug}-CodeBuild
+            AssumeRolePolicyDocument: |
+                    {
+                        "Statement": [{
+                            "Action": "sts:AssumeRole",
+                            "Effect": "Allow",
+                            "Principal": { 
+                                "Service": "codebuild.amazonaws.com" 
+                            }
+                        }]
+                    }
+            Policies: 
+                - 
+                    PolicyName: !Sub ${ProjectSlug}-CodeBuild
+                    PolicyDocument: !Sub |      
+                        {
+                            "Statement": [              
+                                {
+                                    "Effect": "Allow",
+                                    "Resource": [ "*" ],
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
+                                    ]
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Resource": [
+                                        "arn:aws:s3:::${BuildsStoreBucket}/*"
+                                    ],
+                                    "Action": [
+                                        "s3:GetObject",
+                                        "s3:GetObjectVersion",
+                                        "s3:PutObject"
+                                    ]
+                                }
+                            ]
+                        }
+
+    CodePipelineRole:
+        Type: AWS::IAM::Role
+        Properties: 
+            Path: /
+            RoleName: !Sub ${ProjectSlug}-CodePipeline
+            AssumeRolePolicyDocument: |
+                {
+                    "Statement": [{
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": { 
+                            "Service": "codepipeline.amazonaws.com" 
+                        }
+                    }]
+                }
+            Policies: 
+                - 
+                    PolicyName: !Sub ${ProjectSlug}-CodePipeline
+                    PolicyDocument: !Sub |                    
+                        {
+                            "Statement": [
+                                {
+                                    "Action": [ "s3:GetBucketVersioning" ],
+                                    "Resource": [ "arn:aws:s3:::${BuildsStoreBucket}" ],
+                                    "Effect": "Allow"
+                                },
+                                {
+                                    "Action": [
+                                        "s3:PutObject",
+                                        "s3:GetObject",
+                                        "S3:GetObjectVersion"
+                                    ],
+                                    "Resource": [
+                                        "arn:aws:s3:::${BuildsStoreBucket}/*"
+                                    ],
+                                    "Effect": "Allow"
+                                },
+                                {
+                                    "Action": [
+                                        "codedeploy:CreateDeployment",
+                                        "codedeploy:GetApplicationRevision",
+                                        "codedeploy:GetDeployment",
+                                        "codedeploy:GetDeploymentConfig",
+                                        "codedeploy:RegisterApplicationRevision"
+                                    ],
+                                    "Resource": "*",
+                                    "Effect": "Allow"
+                                },
+                                {
+                                    "Action": [
+                                        "cloudformation:CreateStack",
+                                        "cloudformation:DeleteStack",
+                                        "cloudformation:DescribeStacks",
+                                        "cloudformation:UpdateStack",
+                                        "cloudformation:CreateChangeSet",
+                                        "cloudformation:DeleteChangeSet",
+                                        "cloudformation:DescribeChangeSet",
+                                        "cloudformation:ExecuteChangeSet",
+                                        "cloudformation:SetStackPolicy",
+                                        "cloudformation:ValidateTemplate",
+                                        "iam:PassRole"
+                                    ],
+                                    "Resource": [
+                                      "arn:aws:iam::${AWS::AccountId}:role/${ProjectSlug}-CloudFormation-${AWS::Region}",
+                                      "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectSlug}-staging/*",
+                                      "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectSlug}-production/*"
+                                      ],
+                                    "Effect": "Allow"
+                                },
+                                {
+                                    "Action": [
+                                        "codebuild:BatchGetBuilds",
+                                        "codebuild:StartBuild"
+                                    ],
+                                    "Resource": "*",
+                                    "Effect": "Allow"
+                                }
+                            ]
+                        }
