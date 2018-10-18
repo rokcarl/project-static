@@ -29,18 +29,15 @@ Parameters:
         Type: String
         Default: master
 
+    RootCertARN:
+        Description: The ARN of the root domain SSL certificate.
+        Type: String
+
 Resources:
-    S3Bucket:
-        Type: AWS::S3::Bucket
-        Properties: 
-            AccessControl: PublicRead
-            BucketName: !Sub ${ProjectSlug}.${TLD}
-            Tags: 
-            - 
-                Key: "project"
-                Value: !Sub ${ProjectSlug}
-            WebsiteConfiguration:
-                IndexDocument: index.html
+
+    ######################
+    ### BUILD & DEPLOY ###
+    ######################
     BuildsStoreBucket:
         Type: AWS::S3::Bucket
         Properties:
@@ -113,6 +110,52 @@ Resources:
                             Configuration: 
                                 ProjectName: !Ref CodeBuild
 
+    ###############
+    ### WEBSITE ###
+    ###############
+    S3Bucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            AccessControl: PublicRead
+            BucketName: !Sub ${ProjectSlug}.${TLD}
+            Tags:
+            -
+                Key: "project"
+                Value: !Sub ${ProjectSlug}
+            WebsiteConfiguration:
+                IndexDocument: index.html
+
+    CloudFrontDistribution:
+        Type: "AWS::CloudFront::Distribution"
+        Properties:
+            DistributionConfig:
+                Enabled: true
+                Aliases:
+                    - !Sub ${ProjectSlug}.${TLD}
+                DefaultRootObject: index.html
+                PriceClass: PriceClass_All
+                Origins:
+                    -
+                        DomainName: !Sub ${ProjectSlug}.${TLD}.s3-website-${AWS::Region}.amazonaws.com
+                        Id: S3Origin
+                        CustomOriginConfig:
+                            HTTPPort: 80
+                            HTTPSPort: 443
+                            OriginProtocolPolicy: http-only
+                DefaultCacheBehavior:
+                    TargetOriginId: S3Origin
+                    AllowedMethods:
+                        - GET
+                        - HEAD
+                    Compress: true
+                    ForwardedValues:
+                        QueryString: false
+                        Cookies:
+                         Forward: none
+                    ViewerProtocolPolicy: redirect-to-https
+                ViewerCertificate:
+                    AcmCertificateArn: !Ref RootCertARN
+                    SslSupportMethod: sni-only
 
     #############
     ### ROLES ###
